@@ -1,0 +1,24 @@
+services:
+  db:
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  ingest:
+    network_mode: host
+    environment:
+      DATABASE_HOST: 127.0.0.1
+      DATABASE_PORT: 5432
+
+  api:
+    network_mode: host
+    ports: !reset []
+    command:
+      - uvicorn
+      - faq_service.api.main:app
+      - --host
+      - 127.0.0.1
+      - --port
+      - "8000"
+    environment:
+      DATABASE_HOST: 127.0.0.1
+      DATABASE_PORT: 5432

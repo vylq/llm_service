@@ -1,0 +1,1 @@
+"""Small FAQ RAG service."""

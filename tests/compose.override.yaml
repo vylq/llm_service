@@ -1,0 +1,18 @@
+# Use with compose.yaml, ENV_FILE=tests/openrouter.env and --env-file tests/openrouter.env.
+services:
+  mock:
+    image: python:3.12-slim
+    command: [python, /mock.py]
+    volumes:
+      - ./tests/mock_openrouter.py:/mock.py:ro
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:9000')"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+  ingest:
+    volumes:
+      - ./tests/fixtures:/data:ro
+    depends_on:
+      mock:
+        condition: service_healthy
