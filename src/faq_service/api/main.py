@@ -18,21 +18,25 @@ def create_app(settings=None, db=None, graph=None):
         config = settings or Settings()
         logging.basicConfig(level=config.log_level)
         database = db or Database(config)
-        await database.initialize()
-        workflow = graph or build_graph(
-            config,
-            database,
-            chat_model(config),
-            embedding_model(config),
-        )
-        service = ChatService(config, database, workflow)
-        app.state.settings = config
-        app.state.db = database
-        app.state.service = service
         try:
-            yield
+            await database.initialize()
+            workflow = graph or build_graph(
+                config,
+                database,
+                chat_model(config),
+                embedding_model(config),
+            )
+            service = ChatService(config, database, workflow)
+            app.state.settings = config
+            app.state.db = database
+            app.state.service = service
+            try:
+                yield
+            finally:
+                await service.close()
         finally:
-            await service.close()
+            if db is None:
+                await database.close()
 
     app = FastAPI(title="FAQ RAG service", version="0.1.0", lifespan=lifespan)
 

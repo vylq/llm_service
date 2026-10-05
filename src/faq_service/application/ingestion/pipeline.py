@@ -7,12 +7,9 @@ import json
 import tempfile
 import unicodedata
 
-from psycopg.types.json import Jsonb
-
 from faq_service.domain.entities.document import Document, Source
 from faq_service.domain.validation import validate_vector
 from faq_service.infrastructure.db.database import Database
-from faq_service.infrastructure.db.locks import CORPUS_LOCK, INGEST_LOCK
 from faq_service.infrastructure.llm.factory import embedding_model
 from faq_service.settings.app_settings import Settings
 
@@ -76,19 +73,17 @@ def chunk_text(text: str, size: int, overlap: int):
         start = max(start + 1, end - overlap)
 
 
+def spooled_chunks(spool):
+    for line in spool:
+        id_, document_id, text, vector = json.loads(line)
+        yield {"id": id_, "document_id": document_id, "text": text, "embedding": vector}
+
+
 async def ingest(settings: Settings, db: Database, embeddings, rebuild: bool = False):
     documents, rejected, file_hash = load_documents(settings.train_data_path)
     manifest = digest([file_hash, settings.embedding_profile])
     await db.initialize()
-    async with db.connection() as conn:
-        acquired = await (
-            await conn.execute(
-                "SELECT pg_try_advisory_lock(%s, %s) AS ok",
-                INGEST_LOCK,
-            )
-        ).fetchone()
-        if not acquired["ok"]:
-            raise ValueError("Another ingestion is running")
+    async with db.corpus.ingestion() as conn:
         previous = await db.corpus_info(conn)
         if previous and previous["manifest"] == manifest:
             return {"status": "unchanged", "documents": len(documents)}
@@ -117,38 +112,14 @@ async def ingest(settings: Settings, db: Database, embeddings, rebuild: bool = F
                     spool.write(json.dumps([*item[:3], vector], ensure_ascii=False) + "\n")
                 print(f"Embedded {min(start + len(batch), len(chunks))}/{len(chunks)}", flush=True)
             spool.seek(0)
-            async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock(%s, %s)", CORPUS_LOCK)
-                await conn.execute("DELETE FROM documents")
-                async with conn.cursor() as cursor:
-                    await cursor.executemany(
-                        "INSERT INTO documents(id, title, body, sources) VALUES (%s,%s,%s,%s)",
-                        [
-                            (d.id, d.title, d.body, Jsonb([s.model_dump() for s in d.sources]))
-                            for d in documents
-                        ],
-                    )
-                    batch = []
-                    for line in spool:
-                        id_, doc_id, text, vector = json.loads(line)
-                        batch.append((id_, doc_id, text, json.dumps(vector)))
-                        if len(batch) >= settings.embedding_batch_size:
-                            await cursor.executemany(
-                                "INSERT INTO chunks VALUES (%s,%s,%s,%s::vector)",
-                                batch,
-                            )
-                            batch = []
-                    if batch:
-                        await cursor.executemany(
-                            "INSERT INTO chunks VALUES (%s,%s,%s,%s::vector)",
-                            batch,
-                        )
-                await conn.execute(
-                    "INSERT INTO corpus(singleton, manifest, profile) VALUES (true,%s,%s) "
-                    "ON CONFLICT (singleton) DO UPDATE SET "
-                    "manifest=excluded.manifest, profile=excluded.profile",
-                    (manifest, Jsonb(settings.embedding_profile)),
-                )
+            await db.corpus.replace(
+                conn,
+                documents,
+                spooled_chunks(spool),
+                manifest,
+                settings.embedding_profile,
+                settings.embedding_batch_size,
+            )
     return {
         "status": "imported",
         "documents": len(documents),
@@ -162,7 +133,11 @@ async def main():
     parser.add_argument("--rebuild", action="store_true")
     args = parser.parse_args()
     settings = Settings()
-    result = await ingest(settings, Database(settings), embedding_model(settings), args.rebuild)
+    db = Database(settings)
+    try:
+        result = await ingest(settings, db, embedding_model(settings), args.rebuild)
+    finally:
+        await db.close()
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

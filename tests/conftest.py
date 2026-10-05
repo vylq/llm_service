@@ -2,13 +2,13 @@ import json
 import os
 from uuid import uuid4
 
-import psycopg
 import pytest
 import pytest_asyncio
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.runnables import RunnableLambda
-from psycopg import sql
 from psycopg.conninfo import make_conninfo
+from sqlalchemy import DDL
+from sqlalchemy.schema import CreateSchema, DropSchema
 
 from faq_service.application.models.agent_models import ModerationResult, WriterResult
 from faq_service.infrastructure.db.database import Database
@@ -131,13 +131,18 @@ async def database(settings):
     if not dsn:
         pytest.skip("Set TEST_DATABASE_URL to run real pgvector integration tests")
     schema = "test_" + uuid4().hex
-    async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
-        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        await conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    admin = Database(settings, dsn)
+    async with admin.engine.begin() as conn:
+        await conn.execute(DDL("CREATE EXTENSION IF NOT EXISTS vector"))
+        await conn.execute(CreateSchema(schema))
     db = Database(settings, make_conninfo(dsn, options=f"-c search_path={schema},public"))
-    await db.initialize()
     try:
+        await db.initialize()
         yield db
     finally:
-        async with await psycopg.AsyncConnection.connect(dsn, autocommit=True) as conn:
-            await conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+        await db.close()
+        try:
+            async with admin.engine.begin() as conn:
+                await conn.execute(DropSchema(schema, cascade=True))
+        finally:
+            await admin.close()

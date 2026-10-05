@@ -113,7 +113,10 @@ async def test_api_dialogue_and_restart(settings, database, dataset, embeddings)
                 await c.post(f"/api/v1/chats/{uuid4()}/messages", json={"message": "test"})
             ).status_code == 404
     restarted_db = Database(settings, database.dsn)
-    stored = await restarted_db.chats.history(chat_id)
+    try:
+        stored = await restarted_db.chats.history(chat_id)
+    finally:
+        await restarted_db.close()
     assert len(stored) == 2
     assert stored[0]["response"] == body
 

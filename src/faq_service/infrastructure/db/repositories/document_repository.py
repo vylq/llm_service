@@ -1,6 +1,7 @@
-import json
+from sqlalchemy import select
 
 from faq_service.domain.entities.document import Document, RetrievedChunk
+from faq_service.infrastructure.db.models import ChunkRow, DocumentRow
 
 
 class DocumentRepository:
@@ -9,16 +10,22 @@ class DocumentRepository:
         self.settings = db.settings
 
     async def search(self, vector, limit: int):
+        distance = ChunkRow.embedding.cosine_distance(vector)
         async with self.db.connection() as conn:
-            rows = await (
-                await conn.execute(
-                    """SELECT c.id, c.document_id, d.title, c.text,
-                          c.embedding <=> %s::vector AS distance
-                   FROM chunks c JOIN documents d ON d.id = c.document_id
-                   ORDER BY c.embedding <=> %s::vector, c.id LIMIT %s""",
-                    (json.dumps(vector), json.dumps(vector), limit),
+            async with conn.begin():
+                result = await conn.execute(
+                    select(
+                        ChunkRow.id,
+                        ChunkRow.document_id,
+                        DocumentRow.title,
+                        ChunkRow.text,
+                        distance.label("distance"),
+                    )
+                    .join(DocumentRow, DocumentRow.id == ChunkRow.document_id)
+                    .order_by(distance, ChunkRow.id)
+                    .limit(limit)
                 )
-            ).fetchall()
+                rows = result.mappings().all()
         threshold = self.settings.max_cosine_distance
         return [
             RetrievedChunk.model_validate(row)
@@ -30,11 +37,8 @@ class DocumentRepository:
         if not ids:
             return []
         async with self.db.connection() as conn:
-            rows = await (
-                await conn.execute(
-                    "SELECT id, title, body, sources FROM documents WHERE id = ANY(%s)",
-                    (ids,),
-                )
-            ).fetchall()
+            async with conn.begin():
+                result = await conn.execute(select(DocumentRow).where(DocumentRow.id.in_(ids)))
+                rows = result.mappings().all()
         by_id = {row["id"]: Document.model_validate(row) for row in rows}
         return [by_id[id_] for id_ in dict.fromkeys(ids) if id_ in by_id]

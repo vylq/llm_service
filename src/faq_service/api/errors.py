@@ -2,9 +2,9 @@ import logging
 
 import httpx
 import openai
-import psycopg
 from fastapi.responses import JSONResponse
 from ollama import ResponseError
+from sqlalchemy.exc import DBAPIError
 
 from faq_service.domain.errors import ServiceError
 
@@ -28,7 +28,7 @@ def register_handlers(app):
             },
         )
 
-    @app.exception_handler(psycopg.Error)
+    @app.exception_handler(DBAPIError)
     @app.exception_handler(openai.APIError)
     @app.exception_handler(httpx.RequestError)
     @app.exception_handler(ResponseError)
